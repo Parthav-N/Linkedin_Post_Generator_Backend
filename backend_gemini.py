@@ -3,26 +3,44 @@ from flask_cors import CORS
 import os
 import logging
 import google.generativeai as genai
+import sys
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging to stdout for Render
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
-# Set up Gemini API
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyBBhAh0HIqQFThiS19ia6-HaC0_0hB0Ghc")
-genai.configure(api_key=GEMINI_API_KEY)
+# Get Gemini API key from environment variables
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    logger.error("GEMINI_API_KEY environment variable is not set")
+    # Don't set a default API key here for security reasons
+
+# Configure Gemini API if key is available
+if GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        logger.info("Gemini API configured successfully")
+    except Exception as e:
+        logger.error(f"Failed to configure Gemini API: {e}")
 
 # Model configuration
-MODEL_NAME = "models/gemini-1.5-pro"  # You can also use "models/gemini-pro"
+MODEL_NAME = "models/gemini-1.5-pro"
 TEMPERATURE = 0.7
 MAX_TOKENS = 1024
 
 def generate_post(context):
     """Generate a LinkedIn post using Gemini."""
     try:
+        if not GEMINI_API_KEY:
+            return "Error: Gemini API key is not configured"
+            
         logger.info("Generating LinkedIn post...")
         prompt = f"""
         Based on the following context, generate a professional LinkedIn post.
@@ -50,6 +68,9 @@ def generate_post(context):
 def regenerate_post(context):
     """Generate a completely new LinkedIn post."""
     try:
+        if not GEMINI_API_KEY:
+            return "Error: Gemini API key is not configured"
+            
         logger.info("Regenerating LinkedIn post...")
         prompt = f"""
         Based on the following context, generate a NEW professional LinkedIn post.
@@ -78,6 +99,9 @@ def regenerate_post(context):
 def modify_post(post, action):
     """Modify an existing LinkedIn post (reduce or elaborate)."""
     try:
+        if not GEMINI_API_KEY:
+            return "Error: Gemini API key is not configured"
+            
         logger.info(f"Modifying LinkedIn post with action: {action}")
 
         if action == "reduce":
@@ -120,10 +144,11 @@ def modify_post(post, action):
 @app.route('/', methods=['GET'])
 def root():
     """Root endpoint with API status."""
-    print("Home page accessed - API is running!")
+    logger.info("Home page accessed - API is running!")
     return jsonify({
         "status": "API is running",
         "model": MODEL_NAME,
+        "gemini_configured": GEMINI_API_KEY is not None,
         "endpoints": [
             "/",
             "/health",
@@ -136,22 +161,26 @@ def root():
 @app.route('/health', methods=['GET'])
 def health_check():
     """Simple health check endpoint."""
+    logger.info("Health check endpoint accessed")
     return jsonify({"status": "ok"})
 
 @app.route('/generate_post', methods=['POST'])
 def generate_post_endpoint():
     """Generate a LinkedIn post based on the provided context."""
     if not request.is_json:
+        logger.warning("Request is not JSON")
         return jsonify({"error": "Request must be JSON"}), 400
     
     data = request.get_json()
     if 'context' not in data:
+        logger.warning("Missing 'context' field in request")
         return jsonify({"error": "Missing 'context' field"}), 400
 
     logger.info(f"Generating LinkedIn post for context: {data['context'][:50]}...")
     generated_text = generate_post(data['context'])
 
     if isinstance(generated_text, str) and generated_text.startswith("Error"):
+        logger.error(generated_text)
         return jsonify({"error": generated_text}), 500
 
     return jsonify({"post": generated_text.strip()})
@@ -160,16 +189,19 @@ def generate_post_endpoint():
 def regenerate_post_endpoint():
     """Generate a new LinkedIn post with a different approach."""
     if not request.is_json:
+        logger.warning("Request is not JSON")
         return jsonify({"error": "Request must be JSON"}), 400
 
     data = request.get_json()
     if 'context' not in data:
+        logger.warning("Missing 'context' field in request")
         return jsonify({"error": "Missing 'context' field"}), 400
 
     logger.info(f"Regenerating LinkedIn post for context: {data['context'][:50]}...")
     generated_text = regenerate_post(data['context'])
 
     if isinstance(generated_text, str) and generated_text.startswith("Error"):
+        logger.error(generated_text)
         return jsonify({"error": generated_text}), 500
 
     return jsonify({"post": generated_text.strip()})
@@ -178,6 +210,7 @@ def regenerate_post_endpoint():
 def modify_post_endpoint():
     """Modify the existing post according to the action (reduce or elaborate)."""
     if not request.is_json:
+        logger.warning("Request is not JSON")
         return jsonify({"error": "Request must be JSON"}), 400
 
     data = request.get_json()
@@ -185,22 +218,28 @@ def modify_post_endpoint():
     missing_fields = [field for field in required_fields if field not in data]
 
     if missing_fields:
+        logger.warning(f"Missing fields in request: {missing_fields}")
         return jsonify({"error": f"Missing fields: {', '.join(missing_fields)}"}), 400
 
     if data['action'] not in ["reduce", "elaborate"]:
+        logger.warning(f"Invalid action in request: {data['action']}")
         return jsonify({"error": "Invalid action. Use 'reduce' or 'elaborate'."}), 400
 
     logger.info(f"Modifying LinkedIn post with action: {data['action']}")
     modified_text = modify_post(data['current_post'], data['action'])
 
     if isinstance(modified_text, str) and modified_text.startswith("Error"):
+        logger.error(modified_text)
         return jsonify({"error": modified_text}), 500
 
     return jsonify({"post": modified_text.strip()})
 
+# Make app available for Render
+server = app
+
+# Only run the app directly if this file is being run directly
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     logger.info(f"Starting server on port {port}")
-    print("✅ Server deployed successfully and running on port", port)
-
-server = app 
+    app.run(host="0.0.0.0", port=port)
+    logger.info(f"✅ Server deployed successfully and running on port {port}")
