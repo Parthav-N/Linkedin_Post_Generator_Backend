@@ -120,6 +120,7 @@ def modify_post(post, action):
 @app.route('/', methods=['GET'])
 def root():
     """Root endpoint with API status."""
+    print("Home page accessed - API is running!")
     return jsonify({
         "status": "API is running",
         "model": MODEL_NAME,
