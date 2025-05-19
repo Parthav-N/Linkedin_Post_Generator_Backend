@@ -141,6 +141,43 @@ def modify_post(post, action):
         logger.exception(f"Error modifying LinkedIn post: {e}")
         return f"Error modifying LinkedIn post: {str(e)}"
 
+def generate_comment(post_text, post_author, refinement="", current_comment=""):
+    """Generate a LinkedIn comment using Gemini."""
+    try:
+        if not GEMINI_API_KEY:
+            return "Error: Gemini API key is not configured"
+        
+        logger.info("Generating LinkedIn comment...")
+        
+        # Build prompt based on inputs
+        prompt = f"""Post author: "{post_author}"
+Post content: "{post_text}" """
+
+        if current_comment and current_comment.strip():
+            prompt += f"\nCurrent comment: {current_comment}"
+            
+        if refinement and refinement.strip():
+            prompt += f"\nRefinement instructions: {refinement}"
+            
+        if current_comment and current_comment.strip():
+            prompt += """\n\nRefine the current comment based on refinement instructions, keeping it as a congratulatory comment for this LinkedIn post. Only output the final comment — do not include options, explanations, formatting, or any extra text."""
+        else:
+            prompt += """\n\nWrite a single, concise, professional congratulatory comment for this LinkedIn post. Only output the final comment — do not include options, explanations, formatting, or any extra text. Include author's name in the comment."""
+            
+        model = genai.GenerativeModel(MODEL_NAME)
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=TEMPERATURE,
+                max_output_tokens=MAX_TOKENS
+            )
+        )
+        logger.info("Comment generated successfully")
+        return response.text
+    except Exception as e:
+        logger.exception(f"Error generating LinkedIn comment: {e}")
+        return f"Error generating LinkedIn comment: {str(e)}"
+
 @app.route('/', methods=['GET'])
 def root():
     """Root endpoint with API status."""
@@ -154,7 +191,8 @@ def root():
             "/health",
             "/generate_post",
             "/regenerate_post",
-            "/modify_post"
+            "/modify_post",
+            "/generate_comment"
         ]
     })
 
@@ -233,6 +271,39 @@ def modify_post_endpoint():
         return jsonify({"error": modified_text}), 500
 
     return jsonify({"post": modified_text.strip()})
+
+@app.route('/generate_comment', methods=['POST'])
+def generate_comment_endpoint():
+    """Generate a comment for a LinkedIn post."""
+    if not request.is_json:
+        logger.warning("Request is not JSON")
+        return jsonify({"error": "Request must be JSON"}), 400
+    
+    data = request.get_json()
+    required_fields = ['post_text', 'post_author']
+    missing_fields = [field for field in required_fields if field not in data]
+
+    if missing_fields:
+        logger.warning(f"Missing fields in request: {missing_fields}")
+        return jsonify({"error": f"Missing fields: {', '.join(missing_fields)}"}), 400
+
+    # Optional parameters
+    refinement = data.get('refinement', '')
+    current_comment = data.get('current_comment', '')
+
+    logger.info(f"Generating LinkedIn comment for post by: {data['post_author']}")
+    generated_comment = generate_comment(
+        data['post_text'], 
+        data['post_author'], 
+        refinement, 
+        current_comment
+    )
+
+    if isinstance(generated_comment, str) and generated_comment.startswith("Error"):
+        logger.error(generated_comment)
+        return jsonify({"error": generated_comment}), 500
+
+    return jsonify({"comment": generated_comment.strip()})
 
 # Make app available for Render
 server = app
