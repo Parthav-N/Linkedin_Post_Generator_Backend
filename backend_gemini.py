@@ -30,7 +30,7 @@ if GEMINI_API_KEY:
     except Exception as e:
         logger.error(f"Failed to configure Gemini API: {e}")
 
-# Firebase initialization
+# Firebase initialization with enhanced debugging
 db = None
 firebase_connection_method = "none"
 
@@ -38,6 +38,27 @@ try:
     import firebase_admin
     from firebase_admin import credentials, firestore
     from datetime import datetime
+    
+    logger.info("=== FIREBASE DEBUG INFO ===")
+    
+    # Debug: Print environment variables (safely)
+    firebase_env_vars = [
+        "FIREBASE_PROJECT_ID",
+        "FIREBASE_PRIVATE_KEY", 
+        "FIREBASE_CLIENT_EMAIL",
+        "FIREBASE_PRIVATE_KEY_ID",
+        "FIREBASE_CLIENT_ID"
+    ]
+    
+    for var in firebase_env_vars:
+        value = os.getenv(var)
+        if value:
+            if var == "FIREBASE_PRIVATE_KEY":
+                logger.info(f"{var}: Present (length: {len(value)}, starts with: {value[:50]}...)")
+            else:
+                logger.info(f"{var}: {value}")
+        else:
+            logger.warning(f"{var}: NOT SET")
     
     # Try to initialize Firebase if not already initialized
     if not firebase_admin._apps:
@@ -50,34 +71,50 @@ try:
             "../firebase-credentials.json"
         ]
         
+        logger.info("Checking for JSON files...")
         for json_path in json_file_paths:
+            logger.info(f"Checking: {json_path} - Exists: {os.path.exists(json_path)}")
             if os.path.exists(json_path):
                 try:
                     cred = credentials.Certificate(json_path)
                     firebase_connection_method = f"JSON file: {json_path}"
-                    logger.info(f"Using Firebase credentials from {json_path}")
+                    logger.info(f"SUCCESS: Using Firebase credentials from {json_path}")
                     break
                 except Exception as e:
-                    logger.warning(f"Failed to load {json_path}: {e}")
+                    logger.error(f"FAILED to load {json_path}: {e}")
                     continue
         
         # Method 2: Try environment variables (for production)
         if not cred:
+            logger.info("JSON file not found, trying environment variables...")
+            
             required_env_vars = [
                 "FIREBASE_PROJECT_ID",
                 "FIREBASE_PRIVATE_KEY", 
                 "FIREBASE_CLIENT_EMAIL"
             ]
             
-            if all(os.getenv(var) for var in required_env_vars):
+            missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+            if missing_vars:
+                logger.error(f"Missing required environment variables: {missing_vars}")
+            else:
+                logger.info("All required environment variables are present, creating Firebase config...")
+                
                 try:
                     # Clean up private key formatting
                     private_key = os.getenv("FIREBASE_PRIVATE_KEY")
+                    logger.info(f"Original private key length: {len(private_key) if private_key else 0}")
+                    
                     if private_key:
                         # Handle different private key formats
                         private_key = private_key.replace('\\n', '\n')
+                        logger.info(f"After \\n replacement: {len(private_key)}")
+                        
                         if not private_key.startswith('-----BEGIN PRIVATE KEY-----'):
                             private_key = f"-----BEGIN PRIVATE KEY-----\n{private_key}\n-----END PRIVATE KEY-----\n"
+                            logger.info("Added BEGIN/END markers to private key")
+                        else:
+                            logger.info("Private key already has proper format")
                     
                     firebase_config = {
                         "type": os.getenv("FIREBASE_TYPE", "service_account"),
@@ -91,38 +128,66 @@ try:
                         "auth_provider_x509_cert_url": os.getenv("FIREBASE_AUTH_PROVIDER_X509_CERT_URL", "https://www.googleapis.com/oauth2/v1/certs")
                     }
                     
-                    # Remove None values
+                    # Remove None values and log config (safely)
                     firebase_config = {k: v for k, v in firebase_config.items() if v is not None}
+                    
+                    # Log config safely (without private key)
+                    safe_config = {k: v for k, v in firebase_config.items() if k != "private_key"}
+                    safe_config["private_key"] = f"<PRESENT - {len(firebase_config.get('private_key', ''))} chars>"
+                    logger.info(f"Firebase config created: {safe_config}")
                     
                     cred = credentials.Certificate(firebase_config)
                     firebase_connection_method = "Environment variables"
-                    logger.info("Using Firebase credentials from environment variables")
+                    logger.info("SUCCESS: Firebase credentials created from environment variables")
                     
                 except Exception as e:
-                    logger.error(f"Failed to create credentials from environment variables: {e}")
+                    logger.error(f"FAILED to create credentials from environment variables: {e}")
+                    logger.error(f"Error type: {type(e).__name__}")
+                    import traceback
+                    logger.error(f"Full traceback: {traceback.format_exc()}")
         
         if cred:
-            firebase_admin.initialize_app(cred)
-            db = firestore.client()
-            logger.info(f"SUCCESS: Firebase initialized via {firebase_connection_method}")
-            
-            # Test connection
+            logger.info("Attempting to initialize Firebase app...")
             try:
+                firebase_admin.initialize_app(cred)
+                db = firestore.client()
+                logger.info(f"SUCCESS: Firebase initialized via {firebase_connection_method}")
+                
+                # Test connection with more detailed logging
+                logger.info("Testing Firebase connection...")
                 test_ref = db.collection('sundai_projects').limit(1)
                 test_docs = list(test_ref.stream())
                 logger.info(f"SUCCESS: Firebase connection verified - found {len(test_docs)} test documents in sundai_projects collection")
+                
+                # Try to get a sample document to verify read permissions
+                if test_docs:
+                    sample_doc = test_docs[0]
+                    sample_data = sample_doc.to_dict()
+                    logger.info(f"Sample document ID: {sample_doc.id}")
+                    logger.info(f"Sample document keys: {list(sample_data.keys()) if sample_data else 'No data'}")
+                
             except Exception as e:
                 logger.error(f"Firebase connection test failed: {e}")
+                logger.error(f"Error type: {type(e).__name__}")
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
                 logger.warning("Firebase initialized but connection test failed - check collection name and permissions")
         else:
-            logger.warning("No Firebase credentials found - Projects functionality will be disabled")
+            logger.error("FAILED: No Firebase credentials could be loaded")
             logger.info("Firebase Setup: Add firebase-credentials.json or set Firebase environment variables")
 
-except ImportError:
-    logger.warning("Firebase Admin SDK not installed - Projects functionality will be disabled")
+except ImportError as e:
+    logger.error(f"Firebase Admin SDK not installed: {e}")
     logger.info("Install with: pip install firebase-admin")
 except Exception as e:
     logger.error(f"Error initializing Firebase: {e}")
+    logger.error(f"Error type: {type(e).__name__}")
+    import traceback
+    logger.error(f"Full traceback: {traceback.format_exc()}")
+
+logger.info("=== END FIREBASE DEBUG INFO ===")
+logger.info(f"Final Firebase status: db={'Connected' if db else 'Not connected'}")
+logger.info(f"Final connection method: {firebase_connection_method}")
 
 # Model configuration
 MODEL_NAME = "models/gemini-1.5-pro"
@@ -385,7 +450,8 @@ def root():
             "/generate_comment",
             "/get_projects",
             "/generate_project_post",
-            "/projects_health"
+            "/projects_health",
+            "/debug_firebase"
         ]
     })
 
@@ -410,6 +476,71 @@ def health_check():
         "firebase": firebase_status,
         "firebase_connection": firebase_connection_method
     })
+
+@app.route('/debug_firebase', methods=['GET'])
+def debug_firebase():
+    """Debug endpoint to check Firebase configuration"""
+    try:
+        debug_info = {
+            "firebase_admin_installed": True,
+            "firebase_apps_count": len(firebase_admin._apps) if 'firebase_admin' in globals() else 0,
+            "db_initialized": db is not None,
+            "connection_method": firebase_connection_method,
+            "environment_variables": {},
+            "test_results": {}
+        }
+        
+        # Check environment variables (safely)
+        env_vars = [
+            "FIREBASE_PROJECT_ID", "FIREBASE_PRIVATE_KEY", "FIREBASE_CLIENT_EMAIL",
+            "FIREBASE_PRIVATE_KEY_ID", "FIREBASE_CLIENT_ID"
+        ]
+        
+        for var in env_vars:
+            value = os.getenv(var)
+            if value:
+                if var == "FIREBASE_PRIVATE_KEY":
+                    debug_info["environment_variables"][var] = {
+                        "present": True,
+                        "length": len(value),
+                        "starts_with": value[:50] + "..." if len(value) > 50 else value,
+                        "has_begin_marker": "-----BEGIN PRIVATE KEY-----" in value,
+                        "has_end_marker": "-----END PRIVATE KEY-----" in value
+                    }
+                else:
+                    debug_info["environment_variables"][var] = {
+                        "present": True,
+                        "value": value
+                    }
+            else:
+                debug_info["environment_variables"][var] = {"present": False}
+        
+        # Test database connection if available
+        if db:
+            try:
+                test_ref = db.collection('sundai_projects').limit(1)
+                test_docs = list(test_ref.stream())
+                debug_info["test_results"]["collection_accessible"] = True
+                debug_info["test_results"]["document_count"] = len(test_docs)
+                
+                if test_docs:
+                    sample_doc = test_docs[0]
+                    debug_info["test_results"]["sample_document"] = {
+                        "id": sample_doc.id,
+                        "keys": list(sample_doc.to_dict().keys())
+                    }
+                
+            except Exception as e:
+                debug_info["test_results"]["collection_accessible"] = False
+                debug_info["test_results"]["error"] = str(e)
+        
+        return jsonify(debug_info)
+        
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "firebase_admin_installed": 'firebase_admin' in globals()
+        }), 500
 
 @app.route('/generate_post', methods=['POST'])
 def generate_post_endpoint():
