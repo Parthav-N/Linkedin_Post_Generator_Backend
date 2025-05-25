@@ -101,20 +101,61 @@ try:
                 logger.info("All required environment variables are present, creating Firebase config...")
                 
                 try:
-                    # Clean up private key formatting
+                    # Enhanced private key handling
                     private_key = os.getenv("FIREBASE_PRIVATE_KEY")
                     logger.info(f"Original private key length: {len(private_key) if private_key else 0}")
                     
                     if private_key:
-                        # Handle different private key formats
-                        private_key = private_key.replace('\\n', '\n')
-                        logger.info(f"After \\n replacement: {len(private_key)}")
+                        # More aggressive cleaning of private key
+                        logger.info("Processing private key...")
                         
+                        # Remove any quotes that might be wrapping the key
+                        if private_key.startswith('"') and private_key.endswith('"'):
+                            private_key = private_key[1:-1]
+                            logger.info("Removed surrounding quotes from private key")
+                        
+                        if private_key.startswith("'") and private_key.endswith("'"):
+                            private_key = private_key[1:-1]
+                            logger.info("Removed surrounding single quotes from private key")
+                        
+                        # Handle different newline formats
+                        original_length = len(private_key)
+                        
+                        # Replace escaped newlines with actual newlines
+                        private_key = private_key.replace('\\n', '\n')
+                        logger.info(f"After \\n replacement: length changed from {original_length} to {len(private_key)}")
+                        
+                        # Ensure proper BEGIN/END markers
                         if not private_key.startswith('-----BEGIN PRIVATE KEY-----'):
-                            private_key = f"-----BEGIN PRIVATE KEY-----\n{private_key}\n-----END PRIVATE KEY-----\n"
-                            logger.info("Added BEGIN/END markers to private key")
-                        else:
-                            logger.info("Private key already has proper format")
+                            if 'BEGIN PRIVATE KEY' in private_key:
+                                # Key might be malformed, try to fix it
+                                logger.info("Private key contains BEGIN marker but not at start, attempting to fix...")
+                                # Split by lines and rebuild
+                                lines = private_key.split('\n')
+                                cleaned_lines = []
+                                for line in lines:
+                                    line = line.strip()
+                                    if line:
+                                        cleaned_lines.append(line)
+                                private_key = '\n'.join(cleaned_lines)
+                            else:
+                                private_key = f"-----BEGIN PRIVATE KEY-----\n{private_key}\n-----END PRIVATE KEY-----\n"
+                                logger.info("Added BEGIN/END markers to private key")
+                        
+                        if not private_key.endswith('-----END PRIVATE KEY-----\n'):
+                            if not private_key.endswith('\n'):
+                                private_key += '\n'
+                            logger.info("Ensured private key ends with newline")
+                        
+                        logger.info(f"Final private key length: {len(private_key)}")
+                        logger.info(f"Private key starts with: {private_key[:50]}...")
+                        logger.info(f"Private key ends with: ...{private_key[-50:]}")
+                        
+                        # Count actual lines in the key
+                        key_lines = private_key.split('\n')
+                        logger.info(f"Private key has {len(key_lines)} lines")
+                        logger.info(f"First 3 lines: {key_lines[:3]}")
+                        logger.info(f"Last 3 lines: {key_lines[-3:]}")
                     
                     firebase_config = {
                         "type": os.getenv("FIREBASE_TYPE", "service_account"),
@@ -136,6 +177,8 @@ try:
                     safe_config["private_key"] = f"<PRESENT - {len(firebase_config.get('private_key', ''))} chars>"
                     logger.info(f"Firebase config created: {safe_config}")
                     
+                    # Try to create credentials with detailed error handling
+                    logger.info("Attempting to create Firebase credentials...")
                     cred = credentials.Certificate(firebase_config)
                     firebase_connection_method = "Environment variables"
                     logger.info("SUCCESS: Firebase credentials created from environment variables")
@@ -143,6 +186,41 @@ try:
                 except Exception as e:
                     logger.error(f"FAILED to create credentials from environment variables: {e}")
                     logger.error(f"Error type: {type(e).__name__}")
+                    
+                    # More detailed error analysis
+                    if "private_key" in str(e).lower():
+                        logger.error("ERROR: Private key format issue detected")
+                        logger.error("This usually means the private key has incorrect line breaks or formatting")
+                        
+                        # Try alternative approach - base64 decode if needed
+                        try:
+                            original_key = os.getenv("FIREBASE_PRIVATE_KEY")
+                            if original_key:
+                                logger.info("Attempting alternative private key processing...")
+                                
+                                # Try different approaches to fix the key
+                                attempts = [
+                                    original_key.replace('\\n', '\n'),
+                                    original_key.replace('\\\\n', '\n'), 
+                                    original_key.replace('\\\n', '\n'),
+                                ]
+                                
+                                for i, attempt in enumerate(attempts):
+                                    try:
+                                        test_config = firebase_config.copy()
+                                        test_config["private_key"] = attempt
+                                        test_cred = credentials.Certificate(test_config)
+                                        cred = test_cred
+                                        firebase_connection_method = f"Environment variables (attempt {i+1})"
+                                        logger.info(f"SUCCESS: Private key fixed with attempt {i+1}")
+                                        break
+                                    except Exception as attempt_error:
+                                        logger.info(f"Attempt {i+1} failed: {attempt_error}")
+                                        continue
+                                        
+                        except Exception as alt_error:
+                            logger.error(f"Alternative approaches also failed: {alt_error}")
+                    
                     import traceback
                     logger.error(f"Full traceback: {traceback.format_exc()}")
         
@@ -188,6 +266,50 @@ except Exception as e:
 logger.info("=== END FIREBASE DEBUG INFO ===")
 logger.info(f"Final Firebase status: db={'Connected' if db else 'Not connected'}")
 logger.info(f"Final connection method: {firebase_connection_method}")
+
+# Alternative approach: Add a route to create firebase credentials from a complete JSON
+@app.route('/set_firebase_json', methods=['POST'])
+def set_firebase_json():
+    """Alternative approach - accepts complete Firebase JSON"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'firebase_config' not in data:
+            return jsonify({'error': 'Missing firebase_config in request'}), 400
+        
+        firebase_config = data['firebase_config']
+        
+        # Validate required fields
+        required_fields = ['project_id', 'private_key', 'client_email']
+        missing_fields = [field for field in required_fields if field not in firebase_config]
+        
+        if missing_fields:
+            return jsonify({'error': f'Missing fields: {missing_fields}'}), 400
+        
+        global db, firebase_connection_method
+        
+        # Try to initialize with the provided config
+        if firebase_admin._apps:
+            # Delete existing app
+            firebase_admin.delete_app(firebase_admin.get_app())
+        
+        cred = credentials.Certificate(firebase_config)
+        firebase_admin.initialize_app(cred)
+        db = firestore.client()
+        firebase_connection_method = "Manual JSON upload"
+        
+        # Test connection
+        test_ref = db.collection('sundai_projects').limit(1)
+        test_docs = list(test_ref.stream())
+        
+        return jsonify({
+            'success': True,
+            'message': 'Firebase configured successfully',
+            'test_documents_found': len(test_docs)
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 # Model configuration
 MODEL_NAME = "models/gemini-1.5-pro"
