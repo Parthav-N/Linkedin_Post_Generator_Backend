@@ -789,7 +789,7 @@ def get_projects():
         projects = []
         for doc in docs:
             try:
-                project_data = doc.data()
+                project_data = doc.to_dict()
                 
                 # Ensure we have required fields
                 if not project_data.get('title'):
