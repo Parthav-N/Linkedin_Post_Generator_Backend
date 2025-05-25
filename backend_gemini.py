@@ -30,6 +30,100 @@ if GEMINI_API_KEY:
     except Exception as e:
         logger.error(f"Failed to configure Gemini API: {e}")
 
+# Firebase initialization
+db = None
+firebase_connection_method = "none"
+
+try:
+    import firebase_admin
+    from firebase_admin import credentials, firestore
+    from datetime import datetime
+    
+    # Try to initialize Firebase if not already initialized
+    if not firebase_admin._apps:
+        cred = None
+        
+        # Method 1: Try JSON file (for development)
+        json_file_paths = [
+            "firebase-credentials.json",
+            "./firebase-credentials.json", 
+            "../firebase-credentials.json"
+        ]
+        
+        for json_path in json_file_paths:
+            if os.path.exists(json_path):
+                try:
+                    cred = credentials.Certificate(json_path)
+                    firebase_connection_method = f"JSON file: {json_path}"
+                    logger.info(f"Using Firebase credentials from {json_path}")
+                    break
+                except Exception as e:
+                    logger.warning(f"Failed to load {json_path}: {e}")
+                    continue
+        
+        # Method 2: Try environment variables (for production)
+        if not cred:
+            required_env_vars = [
+                "FIREBASE_PROJECT_ID",
+                "FIREBASE_PRIVATE_KEY", 
+                "FIREBASE_CLIENT_EMAIL"
+            ]
+            
+            if all(os.getenv(var) for var in required_env_vars):
+                try:
+                    # Clean up private key formatting
+                    private_key = os.getenv("FIREBASE_PRIVATE_KEY")
+                    if private_key:
+                        # Handle different private key formats
+                        private_key = private_key.replace('\\n', '\n')
+                        if not private_key.startswith('-----BEGIN PRIVATE KEY-----'):
+                            private_key = f"-----BEGIN PRIVATE KEY-----\n{private_key}\n-----END PRIVATE KEY-----\n"
+                    
+                    firebase_config = {
+                        "type": os.getenv("FIREBASE_TYPE", "service_account"),
+                        "project_id": os.getenv("FIREBASE_PROJECT_ID"),
+                        "private_key_id": os.getenv("FIREBASE_PRIVATE_KEY_ID"),
+                        "private_key": private_key,
+                        "client_email": os.getenv("FIREBASE_CLIENT_EMAIL"),
+                        "client_id": os.getenv("FIREBASE_CLIENT_ID"),
+                        "auth_uri": os.getenv("FIREBASE_AUTH_URI", "https://accounts.google.com/o/oauth2/auth"),
+                        "token_uri": os.getenv("FIREBASE_TOKEN_URI", "https://oauth2.googleapis.com/token"),
+                        "auth_provider_x509_cert_url": os.getenv("FIREBASE_AUTH_PROVIDER_X509_CERT_URL", "https://www.googleapis.com/oauth2/v1/certs")
+                    }
+                    
+                    # Remove None values
+                    firebase_config = {k: v for k, v in firebase_config.items() if v is not None}
+                    
+                    cred = credentials.Certificate(firebase_config)
+                    firebase_connection_method = "Environment variables"
+                    logger.info("Using Firebase credentials from environment variables")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to create credentials from environment variables: {e}")
+        
+        if cred:
+            firebase_admin.initialize_app(cred)
+            db = firestore.client()
+            logger.info(f"SUCCESS: Firebase initialized via {firebase_connection_method}")
+            
+            # Test connection
+            try:
+                test_ref = db.collection('sundai_projects').limit(1)
+                test_docs = list(test_ref.stream())
+                logger.info(f"SUCCESS: Firebase connection verified - found {len(test_docs)} test documents in sundai_projects collection")
+            except Exception as e:
+                logger.error(f"Firebase connection test failed: {e}")
+                logger.warning("Firebase initialized but connection test failed - check collection name and permissions")
+        else:
+            logger.warning("No Firebase credentials found - Projects functionality will be disabled")
+            logger.info("Firebase Setup: Add firebase-credentials.json or set Firebase environment variables")
+
+except ImportError:
+    logger.warning("Firebase Admin SDK not installed - Projects functionality will be disabled")
+    logger.info("Install with: pip install firebase-admin")
+except Exception as e:
+    logger.error(f"Error initializing Firebase: {e}")
+
 # Model configuration
 MODEL_NAME = "models/gemini-1.5-pro"
 TEMPERATURE = 0.7
@@ -178,6 +272,100 @@ Post content: "{post_text}" """
         logger.exception(f"Error generating LinkedIn comment: {e}")
         return f"Error generating LinkedIn comment: {str(e)}"
 
+def generate_project_post(project_data):
+    """Generate a LinkedIn post for a specific project."""
+    try:
+        if not GEMINI_API_KEY:
+            return "Error: Gemini API key is not configured"
+        
+        logger.info("Generating project LinkedIn post...")
+        
+        # Extract project information
+        title = project_data.get('title', '')
+        description = project_data.get('description', '')
+        team_lead = project_data.get('team_lead', '')
+        team_members = project_data.get('team_members', [])
+        demo_url = project_data.get('demo_url', '')
+        github_url = project_data.get('github_url', '')
+        blog_url = project_data.get('blog_url', '')
+        tags = project_data.get('tags', [])
+        
+        # Build team information
+        team_info = []
+        if team_lead:
+            team_info.append(f"Team Lead: {team_lead}")
+        if team_members and len(team_members) > 0:
+            if len(team_members) == 1:
+                team_info.append(f"Team Member: {team_members[0]}")
+            else:
+                team_info.append(f"Team Members: {', '.join(team_members)}")
+        
+        team_text = ' | '.join(team_info) if team_info else 'Individual project'
+        
+        # Build links information
+        links_info = []
+        if demo_url:
+            links_info.append(f"🚀 Demo: {demo_url}")
+        if github_url:
+            links_info.append(f"💻 GitHub: {github_url}")
+        if blog_url:
+            links_info.append(f"📝 Blog: {blog_url}")
+        
+        links_text = '\n\n'.join(links_info) if links_info else ''
+        
+        # Build tags text
+        if tags and len(tags) > 0:
+            # Convert tags to hashtags
+            hashtags = []
+            for tag in tags:
+                # Clean tag and make it hashtag-friendly
+                clean_tag = ''.join(c for c in tag if c.isalnum() or c.isspace()).strip()
+                clean_tag = ''.join(clean_tag.split())  # Remove spaces
+                if clean_tag:
+                    hashtags.append(f"#{clean_tag}")
+            
+            tags_text = ' '.join(hashtags) if hashtags else ''
+        else:
+            tags_text = '#SundaiClub #Innovation #TechProject'
+        
+        # Create an engaging prompt for Gemini
+        prompt = f"""Create an engaging and professional LinkedIn post about this innovative project from Sundai Club:
+
+PROJECT TITLE: {title}
+
+PROJECT DESCRIPTION: {description}
+
+TEAM INFORMATION: {team_text}
+
+Make this post:
+1. Professional yet exciting and engaging
+2. Highlight the innovation and impact of the project
+3. Mention the team (give credit where due)
+4. Include a call-to-action (like checking out the demo or connecting)
+5. Use an enthusiastic but professional tone
+6. Keep it concise but informative (ideal LinkedIn post length)
+7. Start with an attention-grabbing opening
+
+{f"Include these links naturally in the post: {links_text}" if links_text else ""}
+
+End the post with these hashtags: {tags_text}
+
+Make sure the post sounds authentic and would get good engagement on LinkedIn. Focus on what makes this project special and why people should care about it."""
+
+        model = genai.GenerativeModel(MODEL_NAME)
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=TEMPERATURE,
+                max_output_tokens=MAX_TOKENS
+            )
+        )
+        logger.info("Project post generated successfully")
+        return response.text
+    except Exception as e:
+        logger.exception(f"Error generating project post: {e}")
+        return f"Error generating project post: {str(e)}"
+
 @app.route('/', methods=['GET'])
 def root():
     """Root endpoint with API status."""
@@ -186,13 +374,18 @@ def root():
         "status": "API is running",
         "model": MODEL_NAME,
         "gemini_configured": GEMINI_API_KEY is not None,
+        "firebase_configured": db is not None,
+        "firebase_connection": firebase_connection_method,
         "endpoints": [
             "/",
             "/health",
             "/generate_post",
             "/regenerate_post",
             "/modify_post",
-            "/generate_comment"
+            "/generate_comment",
+            "/get_projects",
+            "/generate_project_post",
+            "/projects_health"
         ]
     })
 
@@ -200,7 +393,23 @@ def root():
 def health_check():
     """Simple health check endpoint."""
     logger.info("Health check endpoint accessed")
-    return jsonify({"status": "ok"})
+    
+    firebase_status = "not_configured"
+    if db:
+        try:
+            # Test actual database connection
+            test_ref = db.collection('sundai_projects').limit(1)
+            test_docs = list(test_ref.stream())
+            firebase_status = "connected"
+        except Exception as e:
+            firebase_status = "connection_failed"
+    
+    return jsonify({
+        "status": "ok",
+        "gemini_api": "configured" if GEMINI_API_KEY else "not configured",
+        "firebase": firebase_status,
+        "firebase_connection": firebase_connection_method
+    })
 
 @app.route('/generate_post', methods=['POST'])
 def generate_post_endpoint():
@@ -305,6 +514,193 @@ def generate_comment_endpoint():
 
     return jsonify({"comment": generated_comment.strip()})
 
+# NEW ROUTES FOR PROJECTS FUNCTIONALITY
+
+@app.route('/get_projects', methods=['GET'])
+def get_projects():
+    """Fetch all projects from Firebase for the extension"""
+    try:
+        if not db:
+            return jsonify({
+                'success': False,
+                'error': 'Firebase not configured. Please check Firebase setup in backend.',
+                'setup_instructions': 'Add firebase-credentials.json to backend directory or set Firebase environment variables'
+            }), 503
+        
+        logger.info("Fetching projects from Firebase...")
+        
+        # Get all projects from sundai_projects collection
+        projects_ref = db.collection('sundai_projects')
+        docs = projects_ref.stream()
+        
+        projects = []
+        for doc in docs:
+            try:
+                project_data = doc.data()
+                
+                # Ensure we have required fields
+                if not project_data.get('title'):
+                    logger.warning(f"Project {doc.id} missing title, skipping")
+                    continue
+                
+                # Structure project info for extension
+                project_info = {
+                    'id': doc.id,
+                    'title': project_data.get('title', 'Untitled Project'),
+                    'description': project_data.get('description', ''),
+                    'team_lead': project_data.get('team_lead', ''),
+                    'team_members': project_data.get('team_members', []),
+                    'demo_url': project_data.get('demo_url', ''),
+                    'github_url': project_data.get('github_url', ''),
+                    'blog_url': project_data.get('blog_url', ''),
+                    'tags': project_data.get('tags', []),
+                    'last_updated': project_data.get('last_updated', ''),
+                    'start_date': project_data.get('start_date', ''),
+                    'scraped_at': project_data.get('scraped_at', '')
+                }
+                
+                projects.append(project_info)
+                
+            except Exception as e:
+                logger.error(f"Error processing project {doc.id}: {e}")
+                continue
+        
+        # Sort by last_updated (most recent first)
+        projects.sort(key=lambda x: x.get('last_updated', ''), reverse=True)
+        
+        logger.info(f"Successfully fetched {len(projects)} projects from Firebase")
+        
+        return jsonify({
+            'success': True,
+            'projects': projects,
+            'count': len(projects),
+            'connection_method': firebase_connection_method
+        })
+        
+    except Exception as e:
+        logger.exception(f"Error fetching projects from Firebase: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'Database error: {str(e)}',
+            'suggestion': 'Check Firebase configuration and collection name'
+        }), 500
+
+@app.route('/generate_project_post', methods=['POST'])
+def generate_project_post_endpoint():
+    """Generate a LinkedIn post for a specific project"""
+    try:
+        if not request.is_json:
+            logger.warning("Request is not JSON")
+            return jsonify({
+                'success': False,
+                'error': 'Request must be JSON'
+            }), 400
+        
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'success': False,
+                'error': 'No project data provided'
+            }), 400
+        
+        # Extract and validate project information
+        title = data.get('title', '')
+        if not title:
+            return jsonify({
+                'success': False,
+                'error': 'Project title is required'
+            }), 400
+        
+        logger.info(f"Generating LinkedIn post for project: {title}")
+        
+        # Generate the post using the project data
+        generated_post = generate_project_post(data)
+        
+        if isinstance(generated_post, str) and generated_post.startswith("Error"):
+            logger.error(generated_post)
+            return jsonify({
+                'success': False,
+                'error': generated_post
+            }), 500
+        
+        logger.info(f"Successfully generated post for project: {title}")
+        
+        return jsonify({
+            'success': True,
+            'post': generated_post.strip(),
+            'project_title': title
+        })
+        
+    except Exception as e:
+        logger.exception(f"Error generating project post: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'Failed to generate post: {str(e)}'
+        }), 500
+
+@app.route('/projects_health', methods=['GET'])
+def projects_health():
+    """Detailed health check for projects functionality"""
+    try:
+        status = {
+            'success': True,
+            'firebase_connected': False,
+            'gemini_connected': False,
+            'projects_count': 0,
+            'connection_method': firebase_connection_method,
+            'timestamp': datetime.now().isoformat() if 'datetime' in globals() else 'N/A'
+        }
+        
+        # Test Firebase connection
+        if db:
+            try:
+                projects_ref = db.collection('sundai_projects')
+                
+                # Count total projects
+                docs = list(projects_ref.stream())
+                status['projects_count'] = len(docs)
+                status['firebase_connected'] = True
+                
+                logger.info(f"Firebase health check passed - {len(docs)} projects found")
+                
+                # Sample a few project titles for verification
+                if docs:
+                    sample_titles = [doc.data().get('title', 'Untitled')[:50] for doc in docs[:3]]
+                    status['sample_projects'] = sample_titles
+                
+            except Exception as e:
+                logger.error(f"Firebase health check failed: {e}")
+                status['firebase_error'] = str(e)
+        else:
+            status['firebase_error'] = "Firebase not initialized"
+        
+        # Test Gemini API
+        if GEMINI_API_KEY:
+            try:
+                model = genai.GenerativeModel(MODEL_NAME)
+                test_response = model.generate_content("Test connection")
+                if test_response and test_response.text:
+                    status['gemini_connected'] = True
+                    logger.info("Gemini API health check passed")
+            except Exception as e:
+                logger.error(f"Gemini API health check failed: {e}")
+                status['gemini_error'] = str(e)
+        else:
+            status['gemini_error'] = "API key not configured"
+        
+        return jsonify(status)
+        
+    except Exception as e:
+        logger.exception(f"Error in projects health check: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'firebase_connected': False,
+            'gemini_connected': False,
+            'timestamp': datetime.now().isoformat() if 'datetime' in globals() else 'N/A'
+        }), 500
+
 # Make app available for Render
 server = app
 
@@ -312,5 +708,7 @@ server = app
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     logger.info(f"Starting server on port {port}")
+    logger.info(f"Gemini API: {'Configured' if GEMINI_API_KEY else 'Not configured'}")
+    logger.info(f"Firebase: {'Connected' if db else 'Not connected'}")
     app.run(host="0.0.0.0", port=port)
     logger.info(f"✅ Server deployed successfully and running on port {port}")
