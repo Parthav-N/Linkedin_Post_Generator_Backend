@@ -312,7 +312,7 @@ def set_firebase_json():
         return jsonify({'error': str(e)}), 500
 
 # Model configuration
-MODEL_NAME = "models/gemini-1.5-flash"
+MODEL_NAME = "gemini-1.5-flash"
 TEMPERATURE = 0.7
 MAX_TOKENS = 1024
 
@@ -966,3 +966,4 @@ if __name__ == "__main__":
     app.run(host="0.0.0.0", port=port)
 
     logger.info(f"✅ Server deployed successfully and running on port {port}")
+
